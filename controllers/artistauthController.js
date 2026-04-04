@@ -4,218 +4,146 @@ const admin = require("../config/firebase");
 const nodemailer = require("nodemailer");
 const fetch = require("node-fetch");
 
-// ===================== EMAIL =====================
 const sendOTPEmail = async (email, otp) => {
   const transporter = nodemailer.createTransport({
     service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
   });
-
   await transporter.sendMail({
     from: `"artistmatch" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Your OTP Code",
-    html: `
-      <h2>Your OTP is: ${otp}</h2>
-      <p>This code expires in 10 minutes.</p>
-    `,
+    html: `<h2>Your OTP is: ${otp}</h2><p>Expires in 10 minutes.</p>`,
   });
 };
 
-// ===================== ARTIST SIGNUP =====================
-exports.artistSignup = async (req, res) => {
-  const {
-    name,
-    email,
-    password,
-    role,
-    gender,
-    language,
-    location,
-    genre_id,
-    spotify_artist_id,
-  } = req.body;
+// ===================== SIGNUP =====================
+exports.signup = async (req, res) => {
+  const { name, email, password, genres } = req.body;
 
-  if (
-    !name ||
-    !email ||
-    !password ||
-    !role ||
-    !gender ||
-    !language ||
-    !location ||
-    !genre_id
-  ) {
+  if (!name || !email || !password || !genres?.length) {
     return res.status(400).json({ error: "All fields required" });
   }
 
   try {
-    // Check Firebase
     const existingUser = await admin.auth().getUserByEmail(email).catch(() => null);
-    if (existingUser) {
-      return res.status(409).json({ error: "Email already registered" });
-    }
+    if (existingUser) return res.status(409).json({ error: "Email already registered" });
 
-    // Create Firebase user
-    const userRecord = await admin.auth().createUser({
-      email,
-      password,
-      displayName: name,
-    });
+    const userRecord = await admin.auth().createUser({ email, password, displayName: name });
 
-    // Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-    // Insert into DB
-    db.query(
-      `INSERT INTO artists 
-      (name, email, firebase_uid, role, gender, language, location, spotify_artist_id, genre_id, otp, otp_expiry, is_verified)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-      [
-        name,
-        email,
-        userRecord.uid,
-        role,
-        gender,
-        language,
-        location,
-        spotify_artist_id || null,
-        genre_id,
-        otp,
-        otpExpiry,
-      ],
-      async (err) => {
-        if (err) return res.status(500).json({ error: err.message });
+    const { data: newUser, error } = await db
+      .from("users")
+      .insert([{ name, email, firebase_uid: userRecord.uid, otp, otp_expiry: otpExpiry, is_verified: false }])
+      .select()
+      .single();
 
-        try {
-          await sendOTPEmail(email, otp);
-          return res.status(201).json({
-            message: "Artist created. OTP sent to email.",
-          });
-        } catch (e) {
-          return res.status(500).json({ error: "Email sending failed" });
-        }
-      }
-    );
-  } catch (error) {
-    return res.status(500).json({ error: error.message });
+    if (error) return res.status(500).json({ error: error.message });
+
+    const genreValues = genres.map((gid) => ({ user_id: newUser.id, genre_id: gid }));
+    const { error: genreError } = await db.from("user_genres").insert(genreValues);
+    if (genreError) return res.status(500).json({ error: genreError.message });
+
+    await sendOTPEmail(email, otp);
+    return res.status(201).json({ message: "User created. OTP sent to email." });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 };
 
 // ===================== VERIFY OTP =====================
-exports.verifyArtistOTP = (req, res) => {
+exports.verifyOTP = async (req, res) => {
   const { email, otp } = req.body;
+  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required" });
 
-  if (!email || !otp)
-    return res.status(400).json({ error: "Email and OTP required" });
+  const { data: user, error } = await db
+    .from("users")
+    .select("*")
+    .eq("email", email)
+    .single();
 
-  db.query("SELECT * FROM artists WHERE email = ?", [email], (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!results.length)
-      return res.status(404).json({ error: "Artist not found" });
+  if (error || !user) return res.status(404).json({ error: "User not found" });
+  if (user.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
+  if (new Date() > new Date(user.otp_expiry)) return res.status(400).json({ error: "OTP expired" });
 
-    const artist = results[0];
+  const { error: updateError } = await db
+    .from("users")
+    .update({ is_verified: true, otp: null, otp_expiry: null })
+    .eq("email", email);
 
-    if (artist.otp !== otp)
-      return res.status(400).json({ error: "Invalid OTP" });
-
-    if (new Date() > new Date(artist.otp_expiry))
-      return res.status(400).json({ error: "OTP expired" });
-
-    db.query(
-      "UPDATE artists SET is_verified = 1, otp = NULL, otp_expiry = NULL WHERE email = ?",
-      [email],
-      (err2) => {
-        if (err2) return res.status(500).json({ error: err2.message });
-
-        return res.json({ message: "Artist verified successfully" });
-      }
-    );
-  });
+  if (updateError) return res.status(500).json({ error: updateError.message });
+  return res.json({ message: "Verified successfully" });
 };
 
 // ===================== RESEND OTP =====================
-exports.resendArtistOTP = (req, res) => {
+exports.resendOTP = async (req, res) => {
   const { email } = req.body;
-
-  if (!email)
-    return res.status(400).json({ error: "Email required" });
+  if (!email) return res.status(400).json({ error: "Email required" });
 
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+  const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-  db.query(
-    "UPDATE artists SET otp = ?, otp_expiry = ? WHERE email = ?",
-    [otp, otpExpiry, email],
-    async (err) => {
-      if (err) return res.status(500).json({ error: err.message });
+  const { error } = await db
+    .from("users")
+    .update({ otp, otp_expiry: otpExpiry })
+    .eq("email", email);
 
-      try {
-        await sendOTPEmail(email, otp);
-        return res.json({ message: "OTP resent" });
-      } catch {
-        return res.status(500).json({ error: "Email failed" });
-      }
-    }
-  );
-};
-
-// ===================== ARTIST LOGIN =====================
-exports.artistLogin = async (req, res) => {
-  const { email, password } = req.body;
+  if (error) return res.status(500).json({ error: error.message });
 
   try {
-    const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+    await sendOTPEmail(email, otp);
+    return res.json({ message: "OTP resent" });
+  } catch {
+    return res.status(500).json({ error: "Failed to send OTP" });
+  }
+};
 
+// ===================== LOGIN =====================
+exports.login = async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+
+  try {
     const response = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${process.env.FIREBASE_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password,
-          returnSecureToken: true,
-        }),
+        body: JSON.stringify({ email: email.trim(), password: password.trim(), returnSecureToken: true }),
       }
     );
 
     const data = await response.json();
-
-    if (data.error) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+    if (data.error) return res.status(401).json({ error: data.error.message || "Invalid credentials" });
 
     const firebaseUid = data.localId;
 
-    db.query(
-      "SELECT * FROM artists WHERE firebase_uid = ?",
-      [firebaseUid],
-      (err, results) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!results.length)
-          return res.status(404).json({ error: "Artist not found" });
+    // Check users table
+    const { data: user } = await db
+      .from("users")
+      .select("id, name, email, is_verified, profile_image")
+      .eq("firebase_uid", firebaseUid)
+      .single();
 
-        const artist = results[0];
+    if (user) {
+      return res.json({ role: "user", user, token: data.idToken, firebaseUid });
+    }
 
-        if (artist.is_verified === 0) {
-          return res.status(403).json({
-            error: "Please verify your email first",
-          });
-        }
+    // Check artists table
+    const { data: artist, error: artistError } = await db
+      .from("artists")
+      .select("*")
+      .eq("firebase_uid", firebaseUid)
+      .single();
 
-        return res.json({
-          message: "Login successful",
-          artist,
-          token: data.idToken,
-        });
-      }
-    );
-  } catch {
+    if (artistError || !artist) {
+      return res.status(404).json({ error: "Account not found in users or artists" });
+    }
+
+    return res.json({ role: "artist", artist, token: data.idToken, firebaseUid });
+  } catch (err) {
     return res.status(500).json({ error: "Login failed" });
   }
 };

@@ -1,72 +1,73 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db"); // your database connection
+const db = require("../db");
 
 // POST a new gig
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   const { eventTitle, venue, date, time, genre, pay } = req.body;
 
   if (!eventTitle || !venue || !date || !time || !genre || !pay) {
     return res.status(400).json({ message: "All fields are required" });
   }
 
-  const sql = `
-    INSERT INTO gigs 
-    (event_title, venue, event_date, event_time, genre, pay)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `;
+  const { data, error } = await db
+    .from("gigs")
+    .insert([{ event_title: eventTitle, venue, event_date: date, event_time: time, genre, pay: Number(pay) }])
+    .select()
+    .single();
 
-db.query(sql, [eventTitle, venue, date, time, genre, Number(pay)], (err, result) => {
-  if (err) {
-    console.error("DB error on POST /api/gigs:", err);
+  if (error) {
+    console.error("DB error on POST /api/gigs:", error);
     return res.status(500).json({ message: "Database error" });
   }
 
   const acceptsJson = req.headers["content-type"]?.includes("application/json");
   if (acceptsJson) {
-    return res.status(201).json({ message: "Gig posted successfully", gigId: result.insertId });
+    return res.status(201).json({ message: "Gig posted successfully", gigId: data.id });
   }
   res.redirect("/");
 });
-});
 
 // GET all gigs
-router.get("/", (req, res) => {
-  const sql = "SELECT * FROM gigs ORDER BY created_at DESC";
+router.get("/", async (req, res) => {
+  const { data, error } = await db
+    .from("gigs")
+    .select("*")
+    .order("created_at", { ascending: false });
 
-  db.query(sql, (err, results) => {
-    if (err) return res.status(500).json({ message: "Database error" });
-    res.json(results);
-  });
+  if (error) return res.status(500).json({ message: "Database error" });
+  res.json(data);
 });
 
-router.get("/:id", (req, res) => {
-  db.query("SELECT * FROM gigs WHERE id = ?", [req.params.id], (err, results) => {
-    if (err) return res.status(500).json({ message: "Database error" });
-    if (results.length === 0) return res.status(404).json({ message: "Gig not found" });
-    res.json(results[0]);
-  });
-});
+// GET single gig
+router.get("/:id", async (req, res) => {
+  const { data, error } = await db
+    .from("gigs")
+    .select("*")
+    .eq("id", req.params.id)
+    .single();
 
-module.exports = router;
+  if (error) return res.status(500).json({ message: "Database error" });
+  if (!data) return res.status(404).json({ message: "Gig not found" });
+  res.json(data);
+});
 
 // POST apply for a gig
-router.post("/apply", (req, res) => {
+router.post("/apply", async (req, res) => {
   const { gig_id, user_id, artist_name, phone, experience, cover_note, portfolio_url, social_media, availability } = req.body;
 
   if (!artist_name || !user_id) {
     return res.status(400).json({ message: "Required fields missing" });
   }
 
-  const sql = `
-    INSERT INTO gig_applications 
-    (gig_id, user_id, artist_name, phone, experience, cover_note, portfolio_url, social_media, availability)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  const { data, error } = await db
+    .from("gig_applications")
+    .insert([{ gig_id: gig_id || null, user_id, artist_name, phone: phone || null, experience: experience || null, cover_note: cover_note || null, portfolio_url: portfolio_url || null, social_media: social_media || null, availability: availability || null }])
+    .select()
+    .single();
 
-  db.query(sql, [gig_id || null, user_id, artist_name, phone || null, experience || null, cover_note || null, portfolio_url || null, social_media || null, availability || null], (err, result) => {
-    if (err) return res.status(500).json({ message: "Database error", error: err.message });
-    res.status(201).json({ message: "Application submitted", id: result.insertId });
-  });
+  if (error) return res.status(500).json({ message: "Database error", error: error.message });
+  res.status(201).json({ message: "Application submitted", id: data.id });
 });
 
+module.exports = router;
