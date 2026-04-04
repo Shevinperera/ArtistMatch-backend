@@ -17,11 +17,11 @@ const sendOTPEmail = async (email, otp) => {
   });
 };
 
-// ===================== SIGNUP =====================
-exports.signup = async (req, res) => {
-  const { name, email, password, genres } = req.body;
+// ===================== ARTIST SIGNUP =====================
+exports.artistSignup = async (req, res) => {
+  const { name, email, password, role, gender, language, location, genre_id, spotify_artist_id } = req.body;
 
-  if (!name || !email || !password || !genres?.length) {
+  if (!name || !email || !password || !role || !gender || !language || !location || !genre_id) {
     return res.status(400).json({ error: "All fields required" });
   }
 
@@ -34,51 +34,47 @@ exports.signup = async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-    const { data: newUser, error } = await db
-      .from("users")
-      .insert([{ name, email, firebase_uid: userRecord.uid, otp, otp_expiry: otpExpiry, is_verified: false }])
-      .select()
-      .single();
+    const { error } = await db.from("artists").insert([{
+      name, email, firebase_uid: userRecord.uid, role, gender, language,
+      location, spotify_artist_id: spotify_artist_id || null,
+      genre_id, otp, otp_expiry: otpExpiry, is_verified: false,
+    }]);
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const genreValues = genres.map((gid) => ({ user_id: newUser.id, genre_id: gid }));
-    const { error: genreError } = await db.from("user_genres").insert(genreValues);
-    if (genreError) return res.status(500).json({ error: genreError.message });
-
     await sendOTPEmail(email, otp);
-    return res.status(201).json({ message: "User created. OTP sent to email." });
+    return res.status(201).json({ message: "Artist created. OTP sent to email." });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 };
 
-// ===================== VERIFY OTP =====================
-exports.verifyOTP = async (req, res) => {
+// ===================== VERIFY ARTIST OTP =====================
+exports.verifyArtistOTP = async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp) return res.status(400).json({ error: "Email and OTP required" });
 
-  const { data: user, error } = await db
-    .from("users")
+  const { data: artist, error } = await db
+    .from("artists")
     .select("*")
     .eq("email", email)
-    .single();
+    .maybeSingle();
 
-  if (error || !user) return res.status(404).json({ error: "User not found" });
-  if (user.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
-  if (new Date() > new Date(user.otp_expiry)) return res.status(400).json({ error: "OTP expired" });
+  if (error || !artist) return res.status(404).json({ error: "Artist not found" });
+  if (artist.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
+  if (new Date() > new Date(artist.otp_expiry)) return res.status(400).json({ error: "OTP expired" });
 
   const { error: updateError } = await db
-    .from("users")
+    .from("artists")
     .update({ is_verified: true, otp: null, otp_expiry: null })
     .eq("email", email);
 
   if (updateError) return res.status(500).json({ error: updateError.message });
-  return res.json({ message: "Verified successfully" });
+  return res.json({ message: "Artist verified successfully" });
 };
 
-// ===================== RESEND OTP =====================
-exports.resendOTP = async (req, res) => {
+// ===================== RESEND ARTIST OTP =====================
+exports.resendArtistOTP = async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required" });
 
@@ -86,7 +82,7 @@ exports.resendOTP = async (req, res) => {
   const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
   const { error } = await db
-    .from("users")
+    .from("artists")
     .update({ otp, otp_expiry: otpExpiry })
     .eq("email", email);
 
@@ -96,14 +92,13 @@ exports.resendOTP = async (req, res) => {
     await sendOTPEmail(email, otp);
     return res.json({ message: "OTP resent" });
   } catch {
-    return res.status(500).json({ error: "Failed to send OTP" });
+    return res.status(500).json({ error: "Email failed" });
   }
 };
 
-// ===================== LOGIN =====================
-exports.login = async (req, res) => {
+// ===================== ARTIST LOGIN =====================
+exports.artistLogin = async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
   try {
     const response = await fetch(
@@ -111,39 +106,26 @@ exports.login = async (req, res) => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), password: password.trim(), returnSecureToken: true }),
+        body: JSON.stringify({ email, password, returnSecureToken: true }),
       }
     );
 
     const data = await response.json();
-    if (data.error) return res.status(401).json({ error: data.error.message || "Invalid credentials" });
+    if (data.error) return res.status(401).json({ error: "Invalid credentials" });
 
     const firebaseUid = data.localId;
 
-    // Check users table
-    const { data: user } = await db
-      .from("users")
-      .select("id, name, email, is_verified, profile_image")
-      .eq("firebase_uid", firebaseUid)
-      .single();
-
-    if (user) {
-      return res.json({ role: "user", user, token: data.idToken, firebaseUid });
-    }
-
-    // Check artists table
-    const { data: artist, error: artistError } = await db
+    const { data: artist, error } = await db
       .from("artists")
       .select("*")
       .eq("firebase_uid", firebaseUid)
-      .single();
+      .maybeSingle();
 
-    if (artistError || !artist) {
-      return res.status(404).json({ error: "Account not found in users or artists" });
-    }
+    if (error || !artist) return res.status(404).json({ error: "Artist not found" });
+    if (!artist.is_verified) return res.status(403).json({ error: "Please verify your email first" });
 
-    return res.json({ role: "artist", artist, token: data.idToken, firebaseUid });
-  } catch (err) {
+    return res.json({ message: "Login successful", artist, token: data.idToken });
+  } catch {
     return res.status(500).json({ error: "Login failed" });
   }
 };
