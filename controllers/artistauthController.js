@@ -18,10 +18,11 @@ const sendOTPEmail = async (email, otp) => {
       subject: "Your OTP Code",
       html: `<h2>Your OTP is: ${otp}</h2><p>Expires in 10 minutes.</p>`,
     });
+
     console.log(`OTP sent to ${email}: ${otp}`);
   } catch (err) {
     console.log("Email sending error:", err);
-    throw new Error("Email sending failed");
+    // do not throw here to avoid blocking signup
   }
 };
 
@@ -34,15 +35,16 @@ exports.artistSignup = async (req, res) => {
   }
 
   try {
-    // Check Firebase
+    // Check if email already exists in Firebase
     const existingUser = await admin.auth().getUserByEmail(email).catch(() => null);
     if (existingUser) return res.status(409).json({ error: "Email already registered" });
 
+    // Create Firebase user
     const userRecord = await admin.auth().createUser({ email, password, displayName: name });
 
-    // Generate OTP and expiry
+    // Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
 
     // Insert artist into DB
     const { error } = await db.from("artists").insert([{
@@ -60,14 +62,16 @@ exports.artistSignup = async (req, res) => {
       is_verified: false,
     }]);
 
-    if (error) {
-      console.log("DB insert error:", error);
-      return res.status(500).json({ error: error.message });
-    }
+    if (error) return res.status(500).json({ error: error.message });
 
-    await sendOTPEmail(email, otp);
-    return res.status(201).json({ message: "Artist created. OTP sent to email." });
+    // Send OTP asynchronously
+    sendOTPEmail(email, otp);
+
+    // Respond immediately
+    return res.status(201).json({ message: "Artist created. OTP will be sent shortly." });
+
   } catch (err) {
+    console.log("Signup error:", err);
     return res.status(500).json({ error: err.message });
   }
 };
@@ -84,7 +88,6 @@ exports.verifyArtistOTP = async (req, res) => {
     .maybeSingle();
 
   if (error || !artist) return res.status(404).json({ error: "Artist not found" });
-
   if (artist.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
   if (new Date() > new Date(artist.otp_expiry)) return res.status(400).json({ error: "OTP expired" });
 
@@ -113,7 +116,9 @@ exports.resendArtistOTP = async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
 
-  await sendOTPEmail(email, otp);
+  // Send OTP asynchronously
+  sendOTPEmail(email, otp);
+
   return res.json({ message: "OTP resent" });
 };
 
