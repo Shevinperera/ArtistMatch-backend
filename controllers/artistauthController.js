@@ -4,11 +4,13 @@ const admin = require("../config/firebase");
 const nodemailer = require("nodemailer");
 const fetch = require("node-fetch");
 
+// -------------------- EMAIL SENDING --------------------
 const sendOTPEmail = async (email, otp) => {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
   });
+
   await transporter.sendMail({
     from: `"artistmatch" <${process.env.EMAIL_USER}>`,
     to: email,
@@ -26,24 +28,47 @@ exports.artistSignup = async (req, res) => {
   }
 
   try {
+    // Check if email already exists in Firebase
     const existingUser = await admin.auth().getUserByEmail(email).catch(() => null);
     if (existingUser) return res.status(409).json({ error: "Email already registered" });
 
+    // Create Firebase user
     const userRecord = await admin.auth().createUser({ email, password, displayName: name });
 
+    // Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
+    // Insert artist into database
     const { error } = await db.from("artists").insert([{
-      name, email, firebase_uid: userRecord.uid, role, gender, language,
-      location, spotify_artist_id: spotify_artist_id || null,
-      genre_id, otp, otp_expiry: otpExpiry, is_verified: false,
+      name,
+      email,
+      firebase_uid: userRecord.uid,
+      role,
+      gender,
+      language,
+      location,
+      spotify_artist_id: spotify_artist_id || null,
+      genre_id,
+      otp,
+      otp_expiry: otpExpiry,
+      is_verified: false,
     }]);
 
     if (error) return res.status(500).json({ error: error.message });
 
-    await sendOTPEmail(email, otp);
-    return res.status(201).json({ message: "Artist created. OTP sent to email." });
+    // Send OTP email but do NOT block signup if email fails
+    try {
+      await sendOTPEmail(email, otp);
+    } catch (err) {
+      console.error("Failed to send OTP email:", err);
+    }
+
+    // Always return 201 so frontend can navigate to OTP page
+    return res.status(201).json({
+      message: "Artist created. OTP sent to email (or failed to send).",
+      email,
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -91,8 +116,9 @@ exports.resendArtistOTP = async (req, res) => {
   try {
     await sendOTPEmail(email, otp);
     return res.json({ message: "OTP resent" });
-  } catch {
-    return res.status(500).json({ error: "Email failed" });
+  } catch (err) {
+    console.error("Failed to resend OTP email:", err);
+    return res.status(200).json({ message: "OTP updated but email failed to send" });
   }
 };
 
@@ -125,7 +151,8 @@ exports.artistLogin = async (req, res) => {
     if (!artist.is_verified) return res.status(403).json({ error: "Please verify your email first" });
 
     return res.json({ message: "Login successful", artist, token: data.idToken });
-  } catch {
+  } catch (err) {
+    console.error("Login failed:", err);
     return res.status(500).json({ error: "Login failed" });
   }
 };
