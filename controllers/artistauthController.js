@@ -3,12 +3,17 @@ const db = require("../config/db");
 const admin = require("../config/firebase");
 const nodemailer = require("nodemailer");
 const fetch = require("node-fetch");
+const dns = require("dns");
 
-// ================= EMAIL TRANSPORTER (REUSABLE) =================
+// ✅ FORCE IPv4 globally (fixes ENETUNREACH error)
+dns.setDefaultResultOrder("ipv4first");
+
+// ================= EMAIL TRANSPORTER =================
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 587,
   secure: false,
+  family: 4, // ✅ force IPv4
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
@@ -18,6 +23,8 @@ const transporter = nodemailer.createTransport({
 // ================= SEND OTP EMAIL =================
 const sendOTPEmail = async (email, otp) => {
   try {
+    console.log("📧 Sending email to:", email);
+
     const info = await transporter.sendMail({
       from: `"artistmatch" <${process.env.EMAIL_USER}>`,
       to: email,
@@ -71,7 +78,7 @@ exports.artistSignup = async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-    console.log("OTP:", otp);
+    console.log("🔢 OTP:", otp);
 
     // Insert into DB
     const { error } = await db.from("artists").insert([{
@@ -96,13 +103,13 @@ exports.artistSignup = async (req, res) => {
 
     console.log("✅ DB Insert Success");
 
-    // ✅ SEND RESPONSE IMMEDIATELY (NO DELAY)
+    // ✅ Respond immediately (FAST)
     res.status(201).json({
       message: "Artist created. OTP will be sent shortly.",
       email,
     });
 
-    // ✅ SEND EMAIL IN BACKGROUND (FAST UX)
+    // ✅ Send email in background
     sendOTPEmail(email, otp).catch(err => {
       console.error("❌ Background Email Error:", err);
     });
